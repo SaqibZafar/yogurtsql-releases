@@ -14,7 +14,8 @@ name: Build release
 #
 # How it's kept safe:
 # - The updater signing key is in the "release" environment, which only the main branch can use
-#   and only after a maintainer approves. Only the `sign` job uses it. That job runs GitHub's own
+#   and only after a maintainer approves. Only the `sign` job uses it, and it refuses any key
+#   that doesn't match the public key built into the version being released. That job runs GitHub's own
 #   actions and .github/scripts/sign-updates.mjs (Node's built-in crypto), nothing from npm or
 #   crates.io, so no dependency of the app ever runs where the key is.
 # - Building runs every npm and Rust dependency, so the build jobs have no signing key and a
@@ -61,7 +62,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      pubkey: ${{ steps.check.outputs.pubkey }}
+      trusted_pubkey: ${{ steps.trust.outputs.pubkey }}
       commit: ${{ steps.check.outputs.commit }}
     services:
       mysql:
@@ -133,7 +134,12 @@ jobs:
           commit=$(git rev-parse HEAD)
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "Building v$VERSION from source commit $commit." >> "$GITHUB_STEP_SUMMARY"
-          # The public key the app trusts, for the signing job to check its signatures against.
+      - name: The updater key this version is signed for
+        id: trust
+        working-directory: source
+        run: |
+          # The public key built into this version. The signing job must sign with its private half
+          # (UPDATER_SIGNING_KEY), and checks every signature against it.
           echo "pubkey=$(node -p "require('./src-tauri/tauri.conf.json').plugins.updater.pubkey")" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -293,8 +299,10 @@ jobs:
           path: ${{ runner.temp }}/release
       - name: Sign the update files
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          UPDATER_SIGNING_KEY: ${{ secrets.UPDATER_SIGNING_KEY }}
+          UPDATER_SIGNING_KEY_PASSWORD: ${{ secrets.UPDATER_SIGNING_KEY_PASSWORD }}
+          # Refuses to sign unless the key matches the public key built into this version.
+          TRUSTED_PUBKEY: ${{ needs.test.outputs.trusted_pubkey }}
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/release"
@@ -307,7 +315,7 @@ jobs:
             "YogurtSQL_${VERSION}_universal.app.tar.gz"
       - name: Check every signature the way the app will
         env:
-          PUBKEY: ${{ needs.test.outputs.pubkey }}
+          PUBKEY: ${{ needs.test.outputs.trusted_pubkey }}
         run: |
           set -euo pipefail
           node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ plugins: { updater: { pubkey: process.env.PUBKEY } } }))' "$RUNNER_TEMP/app-key.json"
