@@ -80,6 +80,13 @@ jobs:
         ports: ["3307:3306"]
         options: >-
           --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-timeout 5s --health-retries 30
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: testroot
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 30
     steps:
       - name: Check the version
         env:
@@ -154,6 +161,8 @@ jobs:
         working-directory: source
         env:
           SQLROG_TEST_TARGETS: "127.0.0.1:3306:root:testroot,127.0.0.1:3307:root:testroot"
+          # PostgreSQL integration tests (tests/integration_pg.rs, from the version with PostgreSQL support).
+          SQLROG_PG_TEST_TARGETS: "127.0.0.1:5432:postgres:testroot"
         run: |
           source "$GITHUB_WORKSPACE/.github/scripts/quiet.sh"
           quiet "npm ci" npm ci
