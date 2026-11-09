@@ -2,11 +2,11 @@
 
 A fast, secure desktop client for MySQL and MariaDB, free to use. It has a familiar workspace layout, light and dark themes, encrypted credentials, and modern SSH and TLS.
 
-This repository holds the installers and the update feed. The application's source code isn't public.
+This repository holds the release builds, a backup copy of every release, and the issue tracker. The application's source code isn't public.
 
 ## Download
 
-Get the latest version from **[Releases](https://github.com/SaqibZafar/yogurtsql-releases/releases/latest)**:
+Get the latest version from **[yogurtsql.com/download](https://yogurtsql.com/download)**. Every release is also here under **[Releases](https://github.com/SaqibZafar/yogurtsql-releases/releases/latest)**:
 
 | System | File |
 | --- | --- |
@@ -23,9 +23,9 @@ The other files (`.sig`, `.app.tar.gz` and `latest.json`) are for the app's buil
 
 ## Updates
 
-YogurtSQL checks for a new version every hour, downloads it in the background, and asks you to restart. You can turn this off in **Settings > Updates**. Every update is signed, and the app installs one only if its signature matches the key built into it.
+YogurtSQL checks for a new version every hour, downloads it in the background, and asks you to restart. Updates come from downloads.yogurtsql.com, with this repository as the backup. You can turn this off in **Settings > Updates**. Every update is signed, and the app installs one only if its signature matches the key built into it.
 
-If you installed version 0.2.1 or earlier, it can't find updates anymore. Install the latest version from Releases once; your connections and settings are kept.
+If you installed version 0.2.1 or earlier, it can't find updates anymore. Install the latest version from [yogurtsql.com/download](https://yogurtsql.com/download) once; your connections and settings are kept.
 
 ## Feedback and security
 

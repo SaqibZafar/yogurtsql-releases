@@ -1,0 +1,302 @@
+name: Build release
+
+# Builds, tests and signs a YogurtSQL release from the private source repository, and leaves it
+# here as a draft release. Nobody outside this repository's maintainers can see a draft.
+#
+# Why here: this repository is public, and GitHub doesn't charge for standard GitHub-hosted
+# runners in public repositories. The source repository has no workflows.
+#
+# Start it by hand (Actions > Build release > Run workflow), or from the source repository:
+#   git push origin v0.2.9
+#   gh workflow run build-release.yml -R SaqibZafar/yogurtsql-releases -f version=0.2.9
+# Then publish with `node .github/scripts/publish-release.mjs v0.2.9` in the source repository.
+#
+# Keeping it free and private:
+# - Only standard runners (ubuntu-24.04, windows-latest, macos-latest). Larger runners are
+#   billed even in public repositories, so never use one here.
+# - It only runs when a maintainer starts it. There's no push, pull_request or schedule trigger,
+#   so forks and outside pull requests can't run it or reach its secrets.
+# - Build and test output stays on the runner (.github/scripts/quiet.sh): the logs are public.
+# - Only GitHub's own actions, pinned to commits (the repository's Actions settings enforce it).
+#
+# Secrets: SOURCE_DEPLOY_KEY (a read-only deploy key on the source repository),
+# TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD. "Check credentials" tests them.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, like 0.2.9. The tag v<version> must already be in the source repository."
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run: test, build and sign, but don't create or change any release."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: SaqibZafar/yogurtsql
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: testroot
+          MYSQL_ROOT_HOST: "%"
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -ptestroot" --health-interval 5s --health-timeout 5s --health-retries 30
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: testroot
+          MARIADB_ROOT_HOST: "%"
+        ports: ["3307:3306"]
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-timeout 5s --health-retries 30
+    steps:
+      - name: Check the version
+        run: |
+          # Plain MAJOR.MINOR.PATCH only: a pre-release suffix breaks the MSI and RPM installers.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must be three numbers, like 0.2.9 (no v, no suffix)."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the source at its tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: refs/tags/v${{ inputs.version }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: source
+      - name: Check the tag matches the app version and the update servers
+        working-directory: source
+        run: |
+          set -euo pipefail
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n1)
+          echo "source $(git rev-parse --short HEAD): tauri.conf.json=$conf package.json=$pkg Cargo.toml=$cargo"
+          if [ "$VERSION" != "$conf" ] || [ "$VERSION" != "$pkg" ] || [ "$VERSION" != "$cargo" ]; then
+            echo "::error::v$VERSION doesn't match the version in tauri.conf.json, package.json and Cargo.toml."
+            exit 1
+          fi
+          # The app reads downloads.yogurtsql.com first and this repository's feed second.
+          endpoints=$(node -p "require('./src-tauri/tauri.conf.json').plugins.updater.endpoints.join(' ')")
+          want="https://downloads.yogurtsql.com/latest.json https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          if [ "$endpoints" != "$want" ]; then
+            echo "::error::The updater endpoints are \"$endpoints\", not \"$want\"."
+            exit 1
+          fi
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - name: Install Linux dependencies
+        run: |
+          source .github/scripts/quiet.sh
+          quiet "apt-get update" sudo apt-get update
+          quiet "apt-get install" sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
+      - name: Test
+        working-directory: source
+        env:
+          SQLROG_TEST_TARGETS: "127.0.0.1:3306:root:testroot,127.0.0.1:3307:root:testroot"
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/quiet.sh"
+          quiet "npm ci" npm ci
+          quiet "npm test" npm test
+          quiet "npm run build" npm run build
+          cd src-tauri
+          quiet "cargo test" cargo test
+          # The counts, so a run that quietly tested nothing would show.
+          grep -hE '^test result:|Tests +[0-9]+ passed' "$RUNNER_TEMP"/quiet-*test*.log || true
+
+  draft:
+    needs: test
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the source's release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: refs/tags/v${{ inputs.version }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: source
+          sparse-checkout: .github/release-notes.md
+          sparse-checkout-cone-mode: false
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          state=$(gh release view "$tag" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          if [ "$state" = "false" ]; then
+            echo "::error::$tag is already published here. Published releases are never replaced: ship a new version."
+            exit 1
+          elif [ "$state" = "true" ]; then
+            echo "Draft $tag already exists; reusing it."
+          else
+            sed "s/<version>/$VERSION/g" source/.github/release-notes.md > "$RUNNER_TEMP/notes.md"
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target main \
+              --title "YogurtSQL $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
+  build:
+    needs: [test, draft]
+    # Runs after the draft is created, or straight after the tests in a dry run.
+    if: ${{ !cancelled() && needs.test.result == 'success' && (needs.draft.result == 'success' || (inputs.dry_run && needs.draft.result == 'skipped')) }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: ""
+          - os: macos-latest
+            args: "--target universal-apple-darwin"
+          - os: ubuntu-24.04
+            args: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    # Signed builds start clean: no caches, so nothing from earlier runs can end up in a release.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the source at its tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: refs/tags/v${{ inputs.version }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          if [ "$RUNNER_OS" = macOS ]; then rustup target add aarch64-apple-darwin x86_64-apple-darwin; fi
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          source .github/scripts/quiet.sh
+          quiet "apt-get update" sudo apt-get update
+          quiet "apt-get install" sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf xdg-utils
+      - name: Install npm packages
+        shell: bash
+        working-directory: source
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/quiet.sh"
+          quiet "npm ci" npm ci
+      - name: Build and sign
+        shell: bash
+        working-directory: source
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          ARGS: ${{ matrix.args }}
+        run: |
+          source "$GITHUB_WORKSPACE/.github/scripts/quiet.sh"
+          # ARGS is unquoted on purpose: it's empty or one flag and its value, from the matrix above.
+          quiet "tauri build" npm run tauri build -- $ARGS
+      - name: Upload to the draft release
+        shell: bash
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          out="$RUNNER_TEMP/release-files"
+          mkdir -p "$out"
+          case "$RUNNER_OS" in
+            Windows)
+              b=src-tauri/target/release/bundle
+              cp "$b"/nsis/*_x64-setup.exe "$b"/nsis/*_x64-setup.exe.sig "$b"/msi/*_x64_en-US.msi "$b"/msi/*_x64_en-US.msi.sig "$out"/
+              ;;
+            macOS)
+              b=src-tauri/target/universal-apple-darwin/release/bundle
+              cp "$b"/dmg/*.dmg "$out"/
+              # The update bundle has no version in its name, so add one to keep releases apart.
+              cp "$b"/macos/YogurtSQL.app.tar.gz "$out/YogurtSQL_${VERSION}_universal.app.tar.gz"
+              cp "$b"/macos/YogurtSQL.app.tar.gz.sig "$out/YogurtSQL_${VERSION}_universal.app.tar.gz.sig"
+              ;;
+            Linux)
+              b=src-tauri/target/release/bundle
+              cp "$b"/appimage/*.AppImage "$b"/appimage/*.AppImage.sig "$b"/deb/*.deb "$b"/rpm/*.rpm "$out"/
+              ;;
+          esac
+          ls -l "$out"
+          # Signed with the key installed apps trust, for this version? Otherwise users' apps
+          # would refuse the update, so stop here.
+          node "$GITHUB_WORKSPACE/.github/scripts/verify-signatures.mjs" "$out" src-tauri/tauri.conf.json "$VERSION"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: built and signed, nothing uploaded."
+            exit 0
+          fi
+          gh release upload "v$VERSION" -R "$GITHUB_REPOSITORY" "$out"/* --clobber
+
+  feed:
+    needs: build
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the source's feed script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: refs/tags/v${{ inputs.version }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: source
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Build and upload latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/assets.txt"
+          mkdir -p "$RUNNER_TEMP/sigs"
+          gh release download "$tag" -R "$GITHUB_REPOSITORY" --pattern '*.sig' --dir "$RUNNER_TEMP/sigs" --clobber
+          node source/.github/scripts/updater-feed.mjs "$VERSION" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}" \
+            "$RUNNER_TEMP/sigs" "$RUNNER_TEMP/assets.txt" "$RUNNER_TEMP/latest.json"
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" "$RUNNER_TEMP/latest.json" --clobber
+          echo "Draft $tag is ready. Publish it from the source repository with: node .github/scripts/publish-release.mjs $tag" >> "$GITHUB_STEP_SUMMARY"

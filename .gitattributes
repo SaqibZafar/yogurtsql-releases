@@ -1,0 +1,2 @@
+# Shell scripts are sourced by bash on the Windows runners too, which fails on CRLF line endings.
+*.sh text eol=lf
