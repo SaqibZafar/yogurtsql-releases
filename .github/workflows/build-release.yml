@@ -9,12 +9,11 @@ name: Build release
 # Start it from the source repository after pushing the tag:
 #   gh workflow run build-release.yml -R SaqibZafar/yogurtsql-releases -f version=0.2.9
 # (add -f dry_run=true to test, build and sign without creating or changing any release).
-# The signing job waits for a maintainer to approve it (Actions > the run > Review deployments).
 # Then publish with `node .github/scripts/publish-release.mjs v0.2.9` in the source repository.
 #
 # How it's kept safe:
-# - The updater signing key is in the "release" environment, which only the main branch can use
-#   and only after a maintainer approves. Only the `sign` job uses it, and it refuses any key
+# - The updater signing key is in the "release" environment, which only the main branch can use.
+#   Only the `sign` job uses it, and it refuses any key
 #   that doesn't match the public key built into the version being released. That job runs GitHub's own
 #   actions and .github/scripts/sign-updates.mjs (Node's built-in crypto), nothing from npm or
 #   crates.io, so no dependency of the app ever runs where the key is.
@@ -284,7 +283,7 @@ jobs:
     needs: [test, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # The key lives here only. The environment allows the main branch and asks a maintainer to approve.
+    # The key lives here only. The environment only allows the main branch.
     environment: release
     permissions:
       contents: read
