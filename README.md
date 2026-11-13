@@ -34,6 +34,6 @@ If you installed version 0.2.1 or earlier, it can't find updates anymore. Instal
 
 ## License
 
-YogurtSQL is proprietary software, free to use under its [license agreement](LICENSE). Copyright (c) 2026 M Saqib Zafar. All rights reserved.
+YogurtSQL is proprietary software, free to use under its [license agreement](LICENSE). Copyright (c) 2026 YogurtSQL. All rights reserved.
 
 The open-source software YogurtSQL is built with is listed, with its licenses, in the app under **Settings > About**.
